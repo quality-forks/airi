@@ -601,6 +601,7 @@ fn print_output(output: Output) -> anyhow::Result<()> {
         vrr_enabled,
         logical,
         max_bpc,
+        hdr,
     } = output;
 
     let serial = serial.as_deref().unwrap_or("Unknown");
@@ -686,6 +687,13 @@ fn print_output(output: Output) -> anyhow::Result<()> {
 
     if let Some(max_bpc) = max_bpc {
         println!("  Max bits per channel: {max_bpc}");
+    }
+
+    if let Some(hdr) = hdr {
+        println!(
+            "  HDR: on, reference {} cd/m², peak {} cd/m², min {} cd/m²",
+            hdr.reference_luminance, hdr.peak_luminance, hdr.min_luminance
+        );
     }
 
     println!("  Available modes:");

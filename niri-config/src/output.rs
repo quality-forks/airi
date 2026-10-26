@@ -68,6 +68,8 @@ pub struct Output {
     #[knuffel(child)]
     pub variable_refresh_rate: Option<Vrr>,
     #[knuffel(child)]
+    pub hdr: Option<Hdr>,
+    #[knuffel(child)]
     pub focus_at_startup: bool,
     // Deprecated; use layout.background_color.
     #[knuffel(child)]
@@ -92,6 +94,11 @@ impl Output {
     pub fn is_vrr_always_off(&self) -> bool {
         self.variable_refresh_rate.is_none()
     }
+
+    /// Whether HDR output was requested for this output.
+    pub fn is_hdr_on(&self) -> bool {
+        self.hdr.as_ref().is_some_and(|hdr| !hdr.off)
+    }
 }
 
 impl Default for Output {
@@ -107,6 +114,7 @@ impl Default for Output {
             mode: None,
             modeline: None,
             variable_refresh_rate: None,
+            hdr: None,
             background_color: None,
             backdrop_color: None,
             hot_corners: None,
@@ -133,6 +141,30 @@ pub struct Position {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct MaxBpc(pub niri_ipc::MaxBpc);
+
+/// HDR output settings.
+///
+/// The presence of the `hdr` block enables HDR signalling on the output, unless `off` is set.
+#[derive(knuffel::Decode, Debug, Clone, Copy, PartialEq, Default)]
+pub struct Hdr {
+    #[knuffel(child)]
+    pub off: bool,
+    /// Luminance of SDR white (and of the reference white of HDR content), in cd/m².
+    ///
+    /// Raise this if SDR content looks too dim compared to SDR mode.
+    #[knuffel(child, unwrap(argument))]
+    pub reference_luminance: Option<FloatOrInt<1, 10000>>,
+    /// Override of the display peak luminance in cd/m², used for tone mapping.
+    ///
+    /// By default this comes from the EDID.
+    #[knuffel(child, unwrap(argument))]
+    pub peak_luminance: Option<FloatOrInt<1, 10000>>,
+    /// Override of the display minimum luminance in cd/m².
+    ///
+    /// By default this comes from the EDID.
+    #[knuffel(child, unwrap(argument))]
+    pub min_luminance: Option<FloatOrInt<0, 10>>,
+}
 
 #[derive(knuffel::Decode, Debug, Clone, PartialEq, Default)]
 pub struct Vrr {

@@ -1,6 +1,5 @@
 use niri_config::utils::MergeWith as _;
 use niri_config::{Config, LayerRule};
-use smithay::backend::renderer::element::surface::WaylandSurfaceRenderElement;
 use smithay::backend::renderer::element::Kind;
 use smithay::desktop::{LayerSurface, PopupKind, PopupManager};
 use smithay::utils::{Logical, Point, Rectangle, Scale, Size};
@@ -15,7 +14,7 @@ use crate::render_helpers::background_effect::BackgroundEffectElement;
 use crate::render_helpers::renderer::NiriRenderer;
 use crate::render_helpers::shadow::ShadowRenderElement;
 use crate::render_helpers::solid_color::{SolidColorBuffer, SolidColorRenderElement};
-use crate::render_helpers::surface::push_elements_from_surface_tree;
+use crate::render_helpers::surface::{push_elements_from_surface_tree, SurfaceRenderElement};
 use crate::render_helpers::xray::XrayPos;
 use crate::render_helpers::{background_effect, RenderCtx};
 use crate::utils::{baba_is_float_offset, round_logical_in_physical};
@@ -57,7 +56,7 @@ pub struct MappedLayer {
 
 niri_render_elements! {
     LayerSurfaceRenderElement<R> => {
-        Wayland = WaylandSurfaceRenderElement<R>,
+        Wayland = SurfaceRenderElement<R>,
         SolidColor = SolidColorRenderElement,
         Shadow = ShadowRenderElement,
         BackgroundEffect = BackgroundEffectElement,
