@@ -69,6 +69,7 @@ pub struct Stream {
 }
 
 #[derive(Clone)]
+#[allow(clippy::large_enum_variant)]
 enum StreamTarget {
     // FIXME: update on scale changes and whatnot.
     Output(niri_ipc::Output),
