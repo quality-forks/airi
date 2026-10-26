@@ -68,11 +68,13 @@ use smithay::wayland::xdg_activation::{
     XdgActivationHandler, XdgActivationState, XdgActivationToken, XdgActivationTokenData,
 };
 
+use crate::color::ImageDescription;
 pub use crate::handlers::xdg_shell::KdeDecorationsModeState;
 use crate::input::click_grab::ClickGrab;
 use crate::layout::workspace::WorkspaceId;
 use crate::layout::{ActivateWindow, LayoutElement};
 use crate::niri::{DndIcon, NewClient, State};
+use crate::protocols::color_management::{ColorManagementHandler, ColorManagementState};
 use crate::protocols::ext_workspace::{self, ExtWorkspaceHandler, ExtWorkspaceManagerState};
 use crate::protocols::foreign_toplevel::{
     self, ForeignToplevelHandler, ForeignToplevelManagerState,
@@ -696,6 +698,16 @@ impl DrmLeaseHandler for State {
             .get_device_from_node(node)
             .unwrap()
             .remove_lease(lease_id);
+    }
+}
+
+impl ColorManagementHandler for State {
+    fn color_management_state(&mut self) -> &mut ColorManagementState {
+        &mut self.niri.color_management_state
+    }
+
+    fn preferred_image_description(&mut self, surface: &WlSurface) -> ImageDescription {
+        crate::niri::preferred_image_description(surface)
     }
 }
 

@@ -1253,6 +1253,21 @@ pub struct Output {
     pub logical: Option<LogicalOutput>,
     /// Maximum bits per channel (bit depth), if known.
     pub max_bpc: Option<u8>,
+    /// HDR parameters, if the output is driven in HDR mode.
+    #[serde(default)]
+    pub hdr: Option<OutputHdr>,
+}
+
+/// HDR parameters of an output.
+#[derive(Debug, Serialize, Deserialize, Clone, Copy, PartialEq)]
+#[cfg_attr(feature = "json-schema", derive(schemars::JsonSchema))]
+pub struct OutputHdr {
+    /// Luminance of SDR white and HDR reference white, in cd/m².
+    pub reference_luminance: f64,
+    /// Peak luminance of the display, in cd/m².
+    pub peak_luminance: f64,
+    /// Minimum luminance of the display, in cd/m².
+    pub min_luminance: f64,
 }
 
 /// Output mode.

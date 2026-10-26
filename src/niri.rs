@@ -24,7 +24,6 @@ use smithay::backend::allocator::Fourcc;
 use smithay::backend::input::{InputTime, Keycode};
 use smithay::backend::renderer::damage::OutputDamageTracker;
 use smithay::backend::renderer::element::memory::MemoryRenderBufferRenderElement;
-use smithay::backend::renderer::element::surface::WaylandSurfaceRenderElement;
 use smithay::backend::renderer::element::utils::{
     select_dmabuf_feedback, CropRenderElement, Relocate, RelocateRenderElement,
     RescaleRenderElement,
@@ -76,7 +75,7 @@ use smithay::utils::{
 };
 use smithay::wayland::background_effect::BackgroundEffectState;
 use smithay::wayland::compositor::{
-    with_states, with_surface_tree_downward, CompositorClientState, CompositorHandler,
+    get_parent, with_states, with_surface_tree_downward, CompositorClientState, CompositorHandler,
     CompositorState, HookId, SurfaceData, TraversalAction,
 };
 use smithay::wayland::cursor_shape::CursorShapeManagerState;
@@ -125,6 +124,7 @@ use crate::a11y::A11y;
 use crate::animation::Clock;
 use crate::backend::tty::SurfaceDmabufFeedback;
 use crate::backend::{Backend, Headless, RenderResult, Tty, Winit};
+use crate::color::{self, ImageDescription};
 use crate::cursor::{CursorManager, CursorTextureCache, RenderCursor, XCursor};
 #[cfg(feature = "dbus")]
 use crate::dbus::freedesktop_locale1::Locale1ToNiri;
@@ -157,6 +157,7 @@ use crate::layout::{
     HitType, Layout, LayoutElement as _, LayoutElementRenderElement, MonitorRenderElement,
 };
 use crate::niri_render_elements;
+use crate::protocols::color_management::ColorManagementState;
 use crate::protocols::ext_workspace::{self, ExtWorkspaceManagerState};
 use crate::protocols::foreign_toplevel::{self, ForeignToplevelManagerState};
 use crate::protocols::gamma_control::GammaControlManagerState;
@@ -168,7 +169,7 @@ use crate::render_helpers::debug::push_opaque_regions;
 use crate::render_helpers::primary_gpu_texture::PrimaryGpuTextureRenderElement;
 use crate::render_helpers::renderer::NiriRenderer;
 use crate::render_helpers::solid_color::{SolidColorBuffer, SolidColorRenderElement};
-use crate::render_helpers::surface::push_elements_from_surface_tree;
+use crate::render_helpers::surface::{push_elements_from_surface_tree, SurfaceRenderElement};
 use crate::render_helpers::texture::TextureBuffer;
 use crate::render_helpers::xray::{Xray, XrayPos};
 use crate::render_helpers::{
@@ -342,6 +343,7 @@ pub struct Niri {
     pub presentation_state: PresentationState,
     pub security_context_state: SecurityContextState,
     pub gamma_control_manager_state: GammaControlManagerState,
+    pub color_management_state: ColorManagementState,
     pub activation_state: XdgActivationState,
     pub mutter_x11_interop_state: MutterX11InteropManagerState,
 
@@ -892,6 +894,7 @@ impl State {
         self.ipc_refresh_casts();
 
         self.niri.refresh_window_rules();
+        self.niri.refresh_color_management();
         self.refresh_ipc_outputs();
         self.ipc_refresh_layout();
         self.ipc_refresh_keyboard_layout_index();
@@ -2631,6 +2634,7 @@ impl Niri {
             GammaControlManagerState::new::<State, _>(&display_handle, move |client| {
                 is_tty && !client.get_data::<ClientState>().unwrap().restricted
             });
+        let color_management_state = ColorManagementState::new::<State>(&display_handle);
         let activation_state = XdgActivationState::new::<State>(&display_handle);
         event_loop
             .insert_source(
@@ -2851,6 +2855,7 @@ impl Niri {
             presentation_state,
             security_context_state,
             gamma_control_manager_state,
+            color_management_state,
             activation_state,
             mutter_x11_interop_state,
             #[cfg(test)]
@@ -3275,6 +3280,20 @@ impl Niri {
         if self.window_mru_ui.output() == Some(output) {
             self.cancel_mru();
         }
+    }
+
+    /// Called when the HDR state or color parameters of an output change.
+    pub fn output_color_changed(&mut self, output: &Output) {
+        self.color_management_state.output_changed(output);
+        self.refresh_color_management();
+        self.queue_redraw(output);
+    }
+
+    /// Sends changes of preferred image descriptions to clients.
+    pub fn refresh_color_management(&mut self) {
+        let _span = tracy_client::span!("Niri::refresh_color_management");
+        self.color_management_state
+            .refresh_preferred(preferred_image_description);
     }
 
     pub fn output_resized(&mut self, output: &Output) {
@@ -7294,7 +7313,7 @@ fn scale_relocate_crop<E: Element>(
 
 niri_render_elements! {
     PointerRenderElements<R> => {
-        Wayland = WaylandSurfaceRenderElement<R>,
+        Wayland = SurfaceRenderElement<R>,
         NamedPointer = MemoryRenderBufferRenderElement<R>,
     }
 }
@@ -7318,7 +7337,7 @@ niri_render_elements! {
             SolidColorRenderElement
         >>>,
         Pointer = PointerRenderElements<R>,
-        Wayland = WaylandSurfaceRenderElement<R>,
+        Wayland = SurfaceRenderElement<R>,
         SolidColor = SolidColorRenderElement,
         ScreenshotUi = ScreenshotUiRenderElement,
         WindowMruUi = WindowMruUiRenderElement<R>,
@@ -7327,4 +7346,19 @@ niri_render_elements! {
         // Used for the CPU-rendered panels.
         RelocatedMemoryBuffer = RelocateRenderElement<MemoryRenderBufferRenderElement<R>>,
     }
+}
+
+/// The image description of the output that the surface is mainly shown on.
+pub fn preferred_image_description(surface: &WlSurface) -> ImageDescription {
+    let mut root = surface.clone();
+    while let Some(parent) = get_parent(&root) {
+        root = parent;
+    }
+
+    with_states(&root, |states| {
+        surface_primary_scanout_output(&root, states)
+    })
+    .map_or_else(ImageDescription::srgb, |output| {
+        color::output_image_description(&output)
+    })
 }

@@ -43,7 +43,6 @@ use niri_config::{
 };
 use niri_ipc::{ColumnDisplay, PositionChange, SizeChange, WindowLayout};
 use scrolling::{Column, ColumnWidth};
-use smithay::backend::renderer::element::surface::WaylandSurfaceRenderElement;
 use smithay::backend::renderer::element::utils::RescaleRenderElement;
 use smithay::backend::renderer::gles::{GlesRenderer, GlesTexture};
 use smithay::output::{self, Output};
@@ -64,6 +63,7 @@ use crate::render_helpers::offscreen::OffscreenData;
 use crate::render_helpers::renderer::NiriRenderer;
 use crate::render_helpers::snapshot::RenderSnapshot;
 use crate::render_helpers::solid_color::{SolidColorBuffer, SolidColorRenderElement};
+use crate::render_helpers::surface::SurfaceRenderElement;
 use crate::render_helpers::texture::TextureBuffer;
 use crate::render_helpers::xray::{Xray, XrayPos};
 use crate::render_helpers::{BakedBuffer, RenderCtx};
@@ -112,7 +112,7 @@ pub struct SizeFrac;
 
 niri_render_elements! {
     LayoutElementRenderElement<R> => {
-        Wayland = WaylandSurfaceRenderElement<R>,
+        Wayland = SurfaceRenderElement<R>,
         SolidColor = SolidColorRenderElement,
         BackgroundEffect = BackgroundEffectElement,
     }
