@@ -11,6 +11,7 @@
 //! description are converted into the blend space as they are drawn, see [`ColorTransform`].
 
 use std::cell::{Cell, RefCell};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Mutex;
 
 use glam::{DMat3, DVec3, Mat3, Vec3};
@@ -584,9 +585,17 @@ pub struct ColorTransform {
     pub max: f32,
 }
 
-/// Returns the image description identity, the same for equal descriptions.
+/// Returns a new image description identity.
 ///
 /// Identities are never reused.
+pub fn fresh_identity() -> u64 {
+    static NEXT: AtomicU64 = AtomicU64::new(1);
+    NEXT.fetch_add(1, Ordering::Relaxed)
+}
+
+/// Returns the image description identity, the same for equal descriptions.
+///
+/// Only for compositor-generated descriptions, since the registry is never pruned.
 pub fn identity(desc: &ImageDescription) -> u64 {
     static REGISTRY: Mutex<Vec<(ImageDescription, u64)>> = Mutex::new(Vec::new());
 
@@ -595,7 +604,7 @@ pub fn identity(desc: &ImageDescription) -> u64 {
         return *id;
     }
 
-    let id = registry.len() as u64 + 1;
+    let id = fresh_identity();
     registry.push((*desc, id));
     id
 }
