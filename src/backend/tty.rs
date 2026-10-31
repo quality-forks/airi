@@ -391,6 +391,8 @@ struct Surface {
     pending_gamma_change: Option<Option<Vec<u16>>>,
     /// Set when the output is driven in HDR mode.
     hdr: Option<HdrParams>,
+    /// HDR config requested when connecting, whether or not HDR could be enabled.
+    hdr_config: Option<niri_config::Hdr>,
     /// Floating point buffer for compositing in HDR mode.
     hdr_buffer: HdrBuffer,
     /// Tracy frame that goes from vblank to vblank.
@@ -1385,6 +1387,12 @@ impl Tty {
                     "not enabling HDR on {connector_name}: HDR is only supported on outputs \
                      connected to the rendering GPU"
                 );
+            } else if !self
+                .gpu_manager
+                .single_renderer(&self.primary_render_node)
+                .is_ok_and(|mut renderer| HdrBuffer::is_supported(&mut renderer))
+            {
+                warn!("not enabling HDR on {connector_name}: the renderer can't composite HDR");
             } else {
                 match hdr_params(
                     &device.drm,
@@ -1402,7 +1410,9 @@ impl Tty {
 
         let mut orientation = None;
         if let Ok(mut props) = ConnectorProperties::try_new(&device.drm, connector.handle()) {
-            set_connector_properties(&mut props, config.max_bpc, Some(hdr));
+            if !set_connector_properties(&mut props, config.max_bpc, Some(hdr)) {
+                bail!("failed to set HDR connector properties");
+            }
 
             match props.get_panel_orientation() {
                 Ok(x) => orientation = Some(x),
@@ -1410,6 +1420,8 @@ impl Tty {
                     trace!("couldn't get panel orientation: {err:?}");
                 }
             }
+        } else if hdr.is_some() {
+            bail!("failed to get connector properties for HDR");
         } else {
             warn!("failed to get connector properties");
         }
@@ -1636,6 +1648,7 @@ impl Tty {
             gamma_props,
             pending_gamma_change: None,
             hdr,
+            hdr_config: config.hdr.filter(|hdr| !hdr.off),
             hdr_buffer: HdrBuffer::new(),
             vblank_frame: None,
             vblank_frame_name,
@@ -2059,7 +2072,13 @@ impl Tty {
                 .render(&mut renderer, size, scale, params, &elements)
             {
                 Ok((elem, _sync, states)) => hdr_frame = Some((elem, states)),
-                Err(err) => warn!("error rendering HDR frame: {err:?}"),
+                Err(err) => {
+                    // Skip the frame: SDR elements would be decoded as PQ.
+                    warn!("error rendering HDR frame: {err:?}");
+                    drop(surface.vblank_frame.take());
+                    queue_estimated_vblank_timer(niri, output.clone(), target_presentation_time);
+                    return rv;
+                }
             }
         }
 
@@ -2577,19 +2596,21 @@ impl Tty {
                     },
                 };
 
-                // Check if HDR needs to change.
-                let hdr_config = config
-                    .hdr
-                    .filter(|hdr| !hdr.off)
-                    .filter(|_| device.render_node == Some(self.primary_render_node));
-                let new_hdr = hdr_config.and_then(|hdr_config| {
-                    hdr_params(&device.drm, surface.connector, &hdr_config)
-                        .map_err(|err| debug!("not enabling HDR: {err:?}"))
-                        .ok()
-                });
+                // Check if HDR needs to change. Compare against the requested config rather than
+                // the HDR state, since enabling HDR may have failed.
+                let hdr_config = config.hdr.filter(|hdr| !hdr.off);
+                let new_hdr = hdr_config
+                    .filter(|_| device.render_node == Some(self.primary_render_node))
+                    .and_then(|hdr_config| {
+                        hdr_params(&device.drm, surface.connector, &hdr_config)
+                            .map_err(|err| debug!("not enabling HDR: {err:?}"))
+                            .ok()
+                    });
                 match (surface.hdr, new_hdr) {
-                    (None, None) => (),
+                    _ if hdr_config == surface.hdr_config => (),
+                    (None, None) => surface.hdr_config = hdr_config,
                     (Some(old), Some(new)) if old.signalling_eq(&new) => {
+                        surface.hdr_config = hdr_config;
                         if old != new {
                             // Only rendering parameters changed.
                             surface.hdr = Some(new);
@@ -3203,7 +3224,6 @@ fn refresh_interval(mode: DrmMode) -> Duration {
     Duration::from_nanos(refresh_interval)
 }
 
-#[cfg(feature = "dbus")]
 /// Waits for the frame to render if needed.
 ///
 /// Returns the element states and whether the frame is empty.
@@ -3223,6 +3243,7 @@ fn finish_frame<B: Buffer, F: Framebuffer, E>(
     (res.states, res.is_empty)
 }
 
+#[cfg(feature = "dbus")]
 fn suspend() -> anyhow::Result<()> {
     let conn = zbus::blocking::Connection::system().context("error connecting to system bus")?;
 
@@ -3865,11 +3886,15 @@ fn hdr_params(
 ///
 /// `hdr` is `None` to leave HDR properties as is, `Some(None)` to reset them, and
 /// `Some(Some(params))` to drive the connector in HDR mode.
+///
+/// Returns `false` if HDR mode was requested but couldn't be set.
 fn set_connector_properties(
     props: &mut ConnectorProperties,
     max_bpc: Option<MaxBpc>,
     hdr: Option<Option<HdrParams>>,
-) {
+) -> bool {
+    let mut hdr_ok = true;
+
     if let Some(max_bpc) = max_bpc {
         if let Err(err) = props.set_max_bpc(max_bpc) {
             debug!("failed to set `max bpc` property: {err}");
@@ -3886,13 +3911,17 @@ fn set_connector_properties(
         Some(Some(params)) => {
             if let Err(err) = props.set_hdr(&params, max_bpc.is_none()) {
                 warn!("failed to set HDR properties: {err:?}");
+                hdr_ok = false;
             }
         }
     }
 
     if let Err(err) = props.commit() {
         warn!("failed to atomically commit properties: {err}");
+        return !matches!(hdr, Some(Some(_)));
     }
+
+    hdr_ok
 }
 
 fn is_vrr_capable(device: &DrmDevice, connector: connector::Handle) -> Option<bool> {

@@ -55,6 +55,18 @@ impl HdrBuffer {
         }
     }
 
+    /// Whether the renderer can composite HDR outputs.
+    pub fn is_supported<R: NiriRenderer>(renderer: &mut R) -> bool {
+        if Shaders::get(renderer).hdr_encode.is_none() {
+            return false;
+        }
+
+        // Binding checks that the texture is color-renderable.
+        let texture: Result<GlesTexture, _> =
+            renderer.create_buffer(Fourcc::Abgr16161616f, Size::from((1, 1)));
+        texture.is_ok_and(|mut texture| renderer.bind(&mut texture).is_ok())
+    }
+
     /// Renders `elements` into the blend space.
     ///
     /// `size` is the output size in physical pixels, after the output transform. The output
