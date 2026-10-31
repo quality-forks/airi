@@ -192,8 +192,13 @@ fn send_preferred_changed(obj: &WpColorManagementSurfaceFeedbackV1, id: u64) {
     }
 }
 
-fn send_ready(obj: &WpImageDescriptionV1, description: &ImageDescription) {
-    let id = color::identity(description);
+fn send_ready(obj: &WpImageDescriptionV1, description: &ImageDescription, info: bool) {
+    // Client-created descriptions get fresh identities, so clients can't grow the registry.
+    let id = if info {
+        color::identity(description)
+    } else {
+        color::fresh_identity()
+    };
     if obj.version() >= 2 {
         obj.ready2((id >> 32) as u32, id as u32);
     } else {
@@ -210,7 +215,7 @@ fn init_description<D>(
     D: Dispatch<WpImageDescriptionV1, ImageDescriptionData> + 'static,
 {
     let obj = data_init.init(id, ImageDescriptionData::Ready { description, info });
-    send_ready(&obj, &description);
+    send_ready(&obj, &description, info);
 }
 
 fn init_failed<D>(
