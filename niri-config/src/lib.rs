@@ -1489,6 +1489,7 @@ mod tests {
                     track_layout: Window,
                     numlock: false,
                 },
+                keyboard_devices: [],
                 touchpad: Touchpad {
                     off: false,
                     tap: true,
@@ -1568,6 +1569,7 @@ mod tests {
                         },
                     ),
                 },
+                mouse_devices: [],
                 trackpoint: Trackpoint {
                     off: true,
                     natural_scroll: true,
