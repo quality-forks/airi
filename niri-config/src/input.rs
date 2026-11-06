@@ -5,7 +5,8 @@ use std::rc::Rc;
 use std::str::FromStr;
 
 use knuffel::errors::DecodeError;
-use knuffel::DecodeScalar;
+use knuffel::traits::ErrorSpan;
+use knuffel::{Decode, DecodeScalar};
 use miette::miette;
 use smithay::input::keyboard::{keysyms, Keysym, XkbConfig};
 use smithay::reexports::input;
@@ -17,8 +18,10 @@ use crate::{FloatOrInt, Includes};
 #[derive(Debug, Default, PartialEq)]
 pub struct Input {
     pub keyboard: Keyboard,
+    pub keyboard_devices: Vec<KeyboardDevice>,
     pub touchpad: Touchpad,
     pub mouse: Mouse,
+    pub mouse_devices: Vec<MouseDevice>,
     pub trackpoint: Trackpoint,
     pub trackball: Trackball,
     pub tablet: Tablet,
@@ -33,12 +36,12 @@ pub struct Input {
 
 #[derive(knuffel::Decode, Debug, Default, PartialEq)]
 pub struct InputPart {
-    #[knuffel(child)]
-    pub keyboard: Option<KeyboardPart>,
+    #[knuffel(children(name = "keyboard"))]
+    pub keyboard: Vec<KeyboardNode>,
     #[knuffel(child)]
     pub touchpad: Option<Touchpad>,
-    #[knuffel(child)]
-    pub mouse: Option<Mouse>,
+    #[knuffel(children(name = "mouse"))]
+    pub mouse: Vec<MouseNode>,
     #[knuffel(child)]
     pub trackpoint: Option<Trackpoint>,
     #[knuffel(child)]
@@ -65,20 +68,25 @@ impl MergeWith<InputPart> for Input {
     fn merge_with(&mut self, part: &InputPart) {
         merge!(
             (self, part),
-            keyboard,
             disable_power_key_handling,
             workspace_auto_back_and_forth,
         );
 
-        merge_clone!(
-            (self, part),
-            touchpad,
-            mouse,
-            trackpoint,
-            trackball,
-            tablet,
-            touch,
-        );
+        merge_clone!((self, part), touchpad, trackpoint, trackball, tablet, touch);
+
+        for node in &part.keyboard {
+            match node {
+                KeyboardNode::All(keyboard) => self.keyboard.merge_with(keyboard),
+                KeyboardNode::Device(device) => self.keyboard_devices.push(device.clone()),
+            }
+        }
+
+        for node in &part.mouse {
+            match node {
+                MouseNode::All(mouse) => self.mouse.clone_from(mouse),
+                MouseNode::Device(device) => self.mouse_devices.push(device.clone()),
+            }
+        }
 
         merge_clone_opt!(
             (self, part),
@@ -87,6 +95,23 @@ impl MergeWith<InputPart> for Input {
             mod_key,
             mod_key_nested,
         );
+    }
+}
+
+impl Input {
+    /// Device names match case-insensitively, and the last matching block wins.
+    pub fn keyboard_device(&self, name: &str) -> Option<&KeyboardDevice> {
+        self.keyboard_devices
+            .iter()
+            .rev()
+            .find(|device| device.name.eq_ignore_ascii_case(name))
+    }
+
+    pub fn mouse(&self, name: &str) -> Mouse {
+        self.mouse_devices
+            .iter()
+            .filter(|device| device.name.eq_ignore_ascii_case(name))
+            .fold(self.mouse.clone(), Mouse::merged_with)
     }
 }
 
@@ -130,6 +155,34 @@ impl MergeWith<KeyboardPart> for Keyboard {
     fn merge_with(&mut self, part: &KeyboardPart) {
         merge_clone!((self, part), xkb, repeat_delay, repeat_rate, track_layout);
         merge!((self, part), numlock);
+    }
+}
+
+/// Repeat, numlock and layout tracking belong to the seat, so a named block only takes `xkb`.
+#[derive(knuffel::Decode, Debug, Clone, PartialEq, Eq)]
+pub struct KeyboardDevice {
+    #[knuffel(argument)]
+    pub name: String,
+    #[knuffel(child)]
+    pub xkb: Xkb,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+pub enum KeyboardNode {
+    All(KeyboardPart),
+    Device(KeyboardDevice),
+}
+
+impl<S: ErrorSpan> Decode<S> for KeyboardNode {
+    fn decode_node(
+        node: &knuffel::ast::SpannedNode<S>,
+        ctx: &mut knuffel::decode::Context<S>,
+    ) -> Result<Self, DecodeError<S>> {
+        if node.arguments.is_empty() {
+            KeyboardPart::decode_node(node, ctx).map(Self::All)
+        } else {
+            KeyboardDevice::decode_node(node, ctx).map(Self::Device)
+        }
     }
 }
 
@@ -256,6 +309,74 @@ pub struct Mouse {
     pub middle_emulation: bool,
     #[knuffel(child)]
     pub scroll_factor: Option<ScrollFactor>,
+}
+
+#[derive(knuffel::Decode, Debug, Clone, PartialEq)]
+pub struct MouseDevice {
+    #[knuffel(argument)]
+    pub name: String,
+    #[knuffel(child)]
+    pub off: Option<Flag>,
+    #[knuffel(child)]
+    pub natural_scroll: Option<Flag>,
+    #[knuffel(child, unwrap(argument))]
+    pub accel_speed: Option<FloatOrInt<-1, 1>>,
+    #[knuffel(child, unwrap(argument, str))]
+    pub accel_profile: Option<AccelProfile>,
+    #[knuffel(child, unwrap(argument, str))]
+    pub scroll_method: Option<ScrollMethod>,
+    #[knuffel(child, unwrap(argument))]
+    pub scroll_button: Option<u32>,
+    #[knuffel(child)]
+    pub scroll_button_lock: Option<Flag>,
+    #[knuffel(child)]
+    pub left_handed: Option<Flag>,
+    #[knuffel(child)]
+    pub middle_emulation: Option<Flag>,
+    #[knuffel(child)]
+    pub scroll_factor: Option<ScrollFactor>,
+}
+
+impl MergeWith<MouseDevice> for Mouse {
+    fn merge_with(&mut self, part: &MouseDevice) {
+        merge!(
+            (self, part),
+            off,
+            natural_scroll,
+            scroll_button_lock,
+            left_handed,
+            middle_emulation,
+        );
+
+        merge_clone!((self, part), accel_speed);
+
+        merge_clone_opt!(
+            (self, part),
+            accel_profile,
+            scroll_method,
+            scroll_button,
+            scroll_factor,
+        );
+    }
+}
+
+#[derive(Debug, PartialEq)]
+pub enum MouseNode {
+    All(Mouse),
+    Device(MouseDevice),
+}
+
+impl<S: ErrorSpan> Decode<S> for MouseNode {
+    fn decode_node(
+        node: &knuffel::ast::SpannedNode<S>,
+        ctx: &mut knuffel::decode::Context<S>,
+    ) -> Result<Self, DecodeError<S>> {
+        if node.arguments.is_empty() {
+            Mouse::decode_node(node, ctx).map(Self::All)
+        } else {
+            MouseDevice::decode_node(node, ctx).map(Self::Device)
+        }
+    }
 }
 
 #[derive(knuffel::Decode, Debug, Default, Clone, PartialEq)]

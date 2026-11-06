@@ -4,7 +4,7 @@ In this section you can configure input devices like keyboard and mouse, and som
 
 There's a section for each device type: `keyboard`, `touchpad`, `mouse`, `trackpoint`, `trackball`, `tablet`, `touch`.
 Settings in those sections will apply to every device of that type.
-Currently, there's no way to configure specific devices individually (but that is planned).
+`keyboard` and `mouse` sections can also target a single device by name, see [Per-Device Settings](#per-device-settings).
 
 All settings at a glance:
 
@@ -298,6 +298,49 @@ Falls back to those when no window is focused (for example, in the overview).
 
     When the tablet is also mapped to a specific output via `map-to-output`, the `map-to-focused-window` flag will map the tablet to the active window on that output.
     If the tablet isn't mapped to any specific output, it will map the tablet to the current focused window regardless of where it is.
+
+### Per-Device Settings
+
+<sup>Since: next release</sup>
+
+Give a `keyboard` or `mouse` section a device name to apply it to that device only.
+Names match case-insensitively.
+Run `sudo libinput list-devices` to see them.
+
+```kdl
+input {
+    keyboard {
+        xkb {
+            layout "us"
+        }
+    }
+
+    keyboard "AT Translated Set 2 keyboard" {
+        xkb {
+            layout "us,ru"
+            options "grp:alt_shift_toggle"
+        }
+    }
+
+    mouse {
+        natural-scroll
+        accel-speed 0.5
+    }
+
+    mouse "Logitech G Pro" {
+        accel-profile "flat"
+        natural-scroll false
+    }
+}
+```
+
+A named `keyboard` section accepts only `xkb`.
+Repeat, Num Lock and layout tracking apply to every keyboard at once, so they stay in the unnamed section.
+niri switches to the named keyboard's layout when you type on it, and back to the unnamed section's layout when you type on another keyboard.
+Each section remembers its active layout, and Caps Lock and Num Lock carry over between keyboards.
+
+A named `mouse` section starts from the unnamed `mouse` section and overrides only the settings it lists.
+In the example above, the Logitech mouse keeps `accel-speed 0.5` and turns off natural scrolling.
 
 ### General Settings
 

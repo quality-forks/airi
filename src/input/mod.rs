@@ -445,6 +445,7 @@ impl State {
         // Restore the real keymap if required (the virtual keyboard uses its own one).
         if virtual_keyboard.is_none() {
             self.restore_configured_keymap();
+            self.load_keymap_for_device(&device);
         }
 
         // Keys from a virtual keyboard are tracked separately from the physical
@@ -821,6 +822,32 @@ impl State {
 
         self.niri.pointer_visibility = PointerVisibility::Hidden;
         self.niri.queue_redraw_all();
+    }
+
+    fn load_keymap_for_device(&mut self, device: &impl Device) {
+        let config = self.niri.config.borrow();
+        let matched = config
+            .input
+            .keyboard_device(&device.name())
+            .map(|block| &block.name);
+        if matched == self.niri.keymap_device.as_ref() {
+            return;
+        }
+
+        let target = matched.cloned();
+        drop(config);
+
+        let mut state = self.current_keyboard_state();
+        if let Some(layout) = state.layout {
+            self.with_keymap_layouts(|layouts, block| layouts.set(block, layout));
+        }
+
+        self.niri.keymap_device = target;
+        self.load_configured_keymap();
+
+        state.layout = self.with_keymap_layouts(|layouts, block| layouts.get(block));
+        self.restore_keyboard_state(state);
+        self.ipc_refresh_keyboard_layout_index();
     }
 
     pub fn handle_bind(&mut self, bind: Bind, pressed: bool, time: InputTime) {
@@ -3840,7 +3867,7 @@ impl State {
         let device_scroll_factor = {
             let config = self.niri.config.borrow();
             match source {
-                AxisSource::Wheel => config.input.mouse.scroll_factor,
+                AxisSource::Wheel => config.input.mouse(&event.device().name()).scroll_factor,
                 AxisSource::Finger => config.input.touchpad.scroll_factor,
                 _ => None,
             }
@@ -5492,7 +5519,7 @@ pub fn apply_libinput_settings(
         && !is_trackball
         && !is_trackpoint;
     if is_mouse {
-        let c = &config.mouse;
+        let c = config.mouse(&device.name());
         let _ = device.config_send_events_set_mode(if c.off {
             input::SendEventsMode::DISABLED
         } else {

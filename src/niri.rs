@@ -1,4 +1,4 @@
-use std::cell::{Cell, RefCell};
+use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 use std::ffi::OsString;
 use std::os::unix::net::UnixStream;
@@ -215,6 +215,27 @@ pub struct SavedKeyboardState {
     pub num_lock: Option<bool>,
 }
 
+/// Active layout per `keyboard "name"` block, `None` being the unnamed block. A layout index only
+/// means something within the keymap it was taken from.
+#[derive(Debug, Default)]
+pub struct KeymapLayouts(Vec<(Option<String>, KeyboardLayout)>);
+
+impl KeymapLayouts {
+    pub fn get(&self, block: Option<&String>) -> Option<KeyboardLayout> {
+        self.0
+            .iter()
+            .find(|(name, _)| name.as_ref() == block)
+            .map(|(_, layout)| *layout)
+    }
+
+    pub fn set(&mut self, block: Option<&String>, layout: KeyboardLayout) {
+        match self.0.iter_mut().find(|(name, _)| name.as_ref() == block) {
+            Some((_, saved)) => *saved = layout,
+            None => self.0.push((block.cloned(), layout)),
+        }
+    }
+}
+
 pub struct Niri {
     pub config: Rc<RefCell<Config>>,
 
@@ -395,6 +416,11 @@ pub struct Niri {
     /// compare against virtual keyboard keymaps, and to switch back to it
     /// afterwards without going through the config again.
     pub configured_keymap: Option<KeymapFile>,
+    /// Name of the `keyboard "name"` block whose xkb is loaded, or `None` for the plain `keyboard`
+    /// block. Updated when a key arrives from a different physical keyboard.
+    pub keymap_device: Option<String>,
+    /// Layouts to restore when switching keymap blocks with `track-layout "global"`.
+    pub keymap_layouts: KeymapLayouts,
 
     pub cursor_manager: CursorManager,
     pub cursor_texture_cache: CursorTextureCache,
@@ -1545,24 +1571,25 @@ impl State {
                 });
 
                 let mut new_layout = current_layout;
+                let block = self.niri.keymap_device.as_ref();
                 // Store the currently active layout for the surface.
                 if let Some(current_focus) = self.niri.keyboard_focus.surface() {
                     with_states(current_focus, |data| {
-                        let cell = data
+                        let layouts = data
                             .data_map
-                            .get_or_insert::<Cell<KeyboardLayout>, _>(Cell::default);
-                        cell.set(current_layout);
+                            .get_or_insert::<RefCell<KeymapLayouts>, _>(Default::default);
+                        layouts.borrow_mut().set(block, current_layout);
                     });
                 }
 
                 if let Some(focus) = focus.surface() {
                     new_layout = with_states(focus, |data| {
-                        let cell = data.data_map.get_or_insert::<Cell<KeyboardLayout>, _>(|| {
-                            // The default layout is effectively the first layout in the
-                            // keymap, so use it for new windows.
-                            Cell::new(KeyboardLayout::default())
-                        });
-                        cell.get()
+                        let layouts = data
+                            .data_map
+                            .get_or_insert::<RefCell<KeymapLayouts>, _>(Default::default);
+                        // The default layout is effectively the first layout in the
+                        // keymap, so use it for new windows.
+                        layouts.borrow().get(block).unwrap_or_default()
                     });
                 }
                 if new_layout != current_layout && focus.surface().is_some() {
@@ -1700,10 +1727,37 @@ impl State {
         }
     }
 
+    /// Runs `f` on the layouts saved in the focused window with `track-layout "window"`, or on the
+    /// global ones otherwise, along with the active keymap block.
+    pub fn with_keymap_layouts<R>(
+        &mut self,
+        f: impl FnOnce(&mut KeymapLayouts, Option<&String>) -> R,
+    ) -> R {
+        let block = self.niri.keymap_device.as_ref();
+        let track_layout = self.niri.config.borrow().input.keyboard.track_layout;
+        match self.niri.keyboard_focus.surface() {
+            Some(surface) if track_layout == TrackLayout::Window => with_states(surface, |data| {
+                let layouts = data
+                    .data_map
+                    .get_or_insert::<RefCell<KeymapLayouts>, _>(Default::default);
+                f(&mut layouts.borrow_mut(), block)
+            }),
+            _ => f(&mut self.niri.keymap_layouts, block),
+        }
+    }
+
     /// Loads the configured keymap (xkb file, xkb config, or locale1's) onto the seat, replacing a
     /// virtual keyboard's if there is one.
     pub fn load_configured_keymap(&mut self) {
-        let mut xkb = self.niri.config.borrow().input.keyboard.xkb.clone();
+        let mut xkb = {
+            let config = self.niri.config.borrow();
+            let input = &config.input;
+            let device = self.niri.keymap_device.as_deref();
+            match device.and_then(|name| input.keyboard_device(name)) {
+                Some(device) => device.xkb.clone(),
+                None => input.keyboard.xkb.clone(),
+            }
+        };
         let mut set_xkb_config = true;
 
         if let Some(XkbFile(Some(keymap))) = xkb.file.take() {
@@ -1804,6 +1858,11 @@ impl State {
             reload_xkb = true;
         }
 
+        if config.input.keyboard_devices != old_config.input.keyboard_devices {
+            self.niri.keymap_device = None;
+            reload_xkb = true;
+        }
+
         // Reload the repeat info.
         if config.input.keyboard.repeat_rate != old_config.input.keyboard.repeat_rate
             || config.input.keyboard.repeat_delay != old_config.input.keyboard.repeat_delay
@@ -1817,6 +1876,7 @@ impl State {
 
         if config.input.touchpad != old_config.input.touchpad
             || config.input.mouse != old_config.input.mouse
+            || config.input.mouse_devices != old_config.input.mouse_devices
             || config.input.trackball != old_config.input.trackball
             || config.input.trackpoint != old_config.input.trackpoint
             || config.input.tablet != old_config.input.tablet
@@ -2567,6 +2627,11 @@ impl State {
                 trace!("ignoring locale1 xkb change because niri config has xkb settings");
                 return;
             }
+
+            if self.niri.keymap_device.is_some() {
+                trace!("deferring locale1 xkb change because a per-device keymap is active");
+                return;
+            }
         }
 
         let xkb = xkb.clone();
@@ -2971,6 +3036,8 @@ impl Niri {
             xkb_from_locale1: None,
             virtual_keyboard_keymap: None,
             configured_keymap: None,
+            keymap_device: None,
+            keymap_layouts: KeymapLayouts::default(),
             cursor_manager,
             cursor_texture_cache: Default::default(),
             cursor_shape_manager_state,
