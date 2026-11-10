@@ -197,6 +197,14 @@ impl Backend {
         }
     }
 
+    pub fn set_output_auto_hdr(&mut self, niri: &mut Niri, output: &Output, enable: bool) {
+        match self {
+            Backend::Tty(tty) => tty.set_output_auto_hdr(niri, output, enable),
+            Backend::Winit(_) => (),
+            Backend::Headless(_) => (),
+        }
+    }
+
     pub fn update_ignored_nodes_config(&mut self, niri: &mut Niri) {
         match self {
             Backend::Tty(tty) => tty.update_ignored_nodes_config(niri),

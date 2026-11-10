@@ -10,7 +10,7 @@
 //! then a final pass encodes it to BT.2100 PQ for scanout. Surfaces with a non-default image
 //! description are converted into the blend space as they are drawn, see [`ColorTransform`].
 
-use std::cell::{Cell, RefCell};
+use std::cell::Cell;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Mutex;
 
@@ -328,6 +328,17 @@ impl ImageDescription {
         }
     }
 
+    /// Whether the content can go brighter than reference white.
+    pub fn is_hdr(&self) -> bool {
+        matches!(
+            self.tf,
+            TransferFunction::St2084Pq
+                | TransferFunction::Hlg
+                | TransferFunction::ExtLinear
+                | TransferFunction::ExtSrgb
+        )
+    }
+
     pub fn effective_target_primaries(&self) -> Primaries {
         self.target_primaries.unwrap_or(self.primaries)
     }
@@ -462,25 +473,42 @@ impl HdrParams {
 
 /// HDR state of an output, stored in its user data.
 #[derive(Debug, Default)]
-struct OutputHdrState(RefCell<Option<HdrParams>>);
+struct OutputHdrState {
+    active: Cell<Option<HdrParams>>,
+    /// Parameters an automatic HDR output would switch to.
+    auto: Cell<Option<HdrParams>>,
+}
+
+fn output_hdr_state(output: &Output) -> &OutputHdrState {
+    let data = output.user_data();
+    data.insert_if_missing(OutputHdrState::default);
+    data.get::<OutputHdrState>().unwrap()
+}
 
 /// Returns the parameters if the output is currently driven in HDR mode.
 pub fn output_hdr(output: &Output) -> Option<HdrParams> {
-    output
-        .user_data()
-        .get::<OutputHdrState>()
-        .and_then(|state| *state.0.borrow())
+    output_hdr_state(output).active.get()
 }
 
 pub fn set_output_hdr(output: &Output, params: Option<HdrParams>) {
-    let data = output.user_data();
-    data.insert_if_missing(OutputHdrState::default);
-    *data.get::<OutputHdrState>().unwrap().0.borrow_mut() = params;
+    output_hdr_state(output).active.set(params);
+}
+
+/// Returns the parameters if the output switches to HDR mode for fullscreen HDR content.
+pub fn output_auto_hdr(output: &Output) -> Option<HdrParams> {
+    output_hdr_state(output).auto.get()
+}
+
+pub fn set_output_auto_hdr(output: &Output, params: Option<HdrParams>) {
+    output_hdr_state(output).auto.set(params);
 }
 
 /// Returns the image description of the output contents.
+///
+/// Automatic HDR outputs report their HDR description while in SDR mode too, since clients only
+/// produce the HDR content that switches the output to HDR when they see an HDR output.
 pub fn output_image_description(output: &Output) -> ImageDescription {
-    match output_hdr(output) {
+    match output_hdr(output).or_else(|| output_auto_hdr(output)) {
         Some(params) => ImageDescription::hdr_output(&params),
         None => ImageDescription::srgb(),
     }

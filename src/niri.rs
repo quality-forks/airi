@@ -160,7 +160,7 @@ use crate::layout::{
     HitType, Layout, LayoutElement as _, LayoutElementRenderElement, MonitorRenderElement,
 };
 use crate::niri_render_elements;
-use crate::protocols::color_management::ColorManagementState;
+use crate::protocols::color_management::{surface_image_description, ColorManagementState};
 use crate::protocols::ext_workspace::{self, ExtWorkspaceManagerState};
 use crate::protocols::foreign_toplevel::{self, ForeignToplevelManagerState};
 use crate::protocols::gamma_control::GammaControlManagerState;
@@ -206,6 +206,9 @@ const CLEAR_COLOR_LOCKED: [f32; 4] = [0.3, 0.1, 0.1, 1.];
 // second, so with the worst timing the maximum interval between two frame callbacks for a surface
 // should be ~1.995 seconds.
 const FRAME_CALLBACK_THROTTLE: Option<Duration> = Some(Duration::from_millis(995));
+
+/// Delay before automatic HDR turns off, so that alt-tabbing and loading screens don't modeset.
+const AUTO_HDR_OFF_DELAY: Duration = Duration::from_secs(3);
 
 /// Parts of the seat keyboard state that get reset when its keymap is replaced.
 #[derive(Debug, Clone, Copy, Default)]
@@ -548,6 +551,8 @@ pub struct OutputState {
     pub frame_clock: FrameClock,
     pub redraw_state: RedrawState,
     pub on_demand_vrr_enabled: bool,
+    /// When automatic HDR turns off, unless HDR content comes back first.
+    pub auto_hdr_off_at: Option<Duration>,
     // After the last redraw, some ongoing animations still remain.
     pub unfinished_animations_remain: bool,
     /// Last sequence received in a vblank event.
@@ -3347,6 +3352,7 @@ impl Niri {
             global,
             redraw_state: RedrawState::Idle,
             on_demand_vrr_enabled: false,
+            auto_hdr_off_at: None,
             unfinished_animations_remain: false,
             frame_clock: FrameClock::new(refresh_interval, vrr),
             last_drm_sequence: None,
@@ -3453,6 +3459,27 @@ impl Niri {
         if self.window_mru_ui.output() == Some(output) {
             self.cancel_mru();
         }
+    }
+
+    /// Called when the backend replaced the scanout of an output, e.g. to switch HDR signalling.
+    pub fn output_surface_recreated(
+        &mut self,
+        output: &Output,
+        refresh_interval: Option<Duration>,
+        vrr: bool,
+    ) {
+        let state = self.output_state.get_mut(output).unwrap();
+        match mem::replace(&mut state.redraw_state, RedrawState::Idle) {
+            RedrawState::Idle | RedrawState::Queued | RedrawState::WaitingForVBlank { .. } => (),
+            RedrawState::WaitingForEstimatedVBlank(token)
+            | RedrawState::WaitingForEstimatedVBlankAndQueued(token) => {
+                self.event_loop.remove(token)
+            }
+        }
+        state.frame_clock = FrameClock::new(refresh_interval, vrr);
+        state.last_drm_sequence = None;
+
+        self.output_color_changed(output);
     }
 
     /// Called when the HDR state or color parameters of an output change.
@@ -5233,6 +5260,7 @@ impl Niri {
         }
 
         self.refresh_on_demand_vrr(backend, output);
+        self.refresh_auto_hdr(output);
 
         // Send the frame callbacks.
         //
@@ -5310,6 +5338,73 @@ impl Niri {
             });
 
         backend.set_output_on_demand_vrr(self, output, current);
+    }
+
+    pub fn refresh_auto_hdr(&mut self, output: &Output) {
+        let _span = tracy_client::span!("Niri::refresh_auto_hdr");
+
+        let name = output.user_data().get::<OutputName>().unwrap();
+        let auto = self
+            .config
+            .borrow()
+            .outputs
+            .find(name)
+            .is_some_and(|output| output.is_hdr_auto());
+        if !auto || color::output_auto_hdr(output).is_none() {
+            return;
+        }
+
+        let mon = self.layout.monitor_for_output(output).unwrap();
+        let wanted = mon
+            .fullscreen_window_above_top_layer()
+            .is_some_and(|mapped| {
+                let mut hdr = false;
+                mapped.window.with_surfaces(|_, states| {
+                    hdr |= surface_image_description(states).is_some_and(|(desc, _)| desc.is_hdr());
+                });
+                hdr
+            });
+        let active = color::output_hdr(output).is_some();
+
+        let state = self.output_state.get_mut(output).unwrap();
+        if wanted || !active {
+            state.auto_hdr_off_at = None;
+        }
+        if wanted == active {
+            return;
+        }
+
+        if !wanted {
+            let now = get_monotonic_time();
+            match state.auto_hdr_off_at {
+                None => {
+                    state.auto_hdr_off_at = Some(now + AUTO_HDR_OFF_DELAY);
+                    let output = output.clone();
+                    let timer = Timer::from_duration(AUTO_HDR_OFF_DELAY);
+                    self.event_loop
+                        .insert_source(timer, move |_, _, state| {
+                            if state.niri.output_state.contains_key(&output) {
+                                state.niri.queue_redraw(&output);
+                            }
+                            TimeoutAction::Drop
+                        })
+                        .unwrap();
+                    return;
+                }
+                Some(off_at) if now < off_at => return,
+                Some(_) => state.auto_hdr_off_at = None,
+            }
+        }
+
+        // The switch drops the scanout surface that this redraw just queued a frame on.
+        let output = output.clone();
+        self.event_loop.insert_idle(move |state| {
+            if state.niri.output_state.contains_key(&output) {
+                state
+                    .backend
+                    .set_output_auto_hdr(&mut state.niri, &output, wanted);
+            }
+        });
     }
 
     pub fn update_primary_scanout_output(

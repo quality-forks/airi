@@ -1282,13 +1282,121 @@ impl Tty {
         connector: connector::Info,
         crtc: crtc::Handle,
     ) -> anyhow::Result<()> {
-        match self.connect_connector(niri, node, connector.clone(), crtc, true) {
-            Err(err) if self.wants_hdr(node, &connector, crtc) => {
+        let hdr_wanted = self.wants_hdr(node, &connector, crtc);
+        self.connect_connector_with_fallback(niri, node, connector, crtc, hdr_wanted, None)
+    }
+
+    fn connect_connector_with_fallback(
+        &mut self,
+        niri: &mut Niri,
+        node: DrmNode,
+        connector: connector::Info,
+        crtc: crtc::Handle,
+        hdr_wanted: bool,
+        existing: Option<Output>,
+    ) -> anyhow::Result<()> {
+        let res = self.connect_connector(
+            niri,
+            node,
+            connector.clone(),
+            crtc,
+            hdr_wanted,
+            existing.clone(),
+        );
+
+        match res {
+            Err(err) if hdr_wanted => {
                 warn!("error connecting connector in HDR mode, retrying without HDR: {err:?}");
-                self.connect_connector(niri, node, connector, crtc, false)
+                self.connect_connector(niri, node, connector, crtc, false, existing)
             }
             res => res,
         }
+    }
+
+    /// Recreates the scanout of an enabled connector, keeping its output and windows.
+    fn recreate_surface(
+        &mut self,
+        niri: &mut Niri,
+        node: DrmNode,
+        crtc: crtc::Handle,
+        hdr_wanted: bool,
+    ) {
+        let Some(device) = self.devices.get_mut(&node) else {
+            error!("missing device");
+            return;
+        };
+        let Some(surface) = device.surfaces.get(&crtc) else {
+            error!("missing surface for crtc {crtc:?}");
+            return;
+        };
+        let Some(connector) = device
+            .drm_scanner
+            .connectors()
+            .get(&surface.connector)
+            .cloned()
+        else {
+            error!("missing enabled connector in drm_scanner");
+            return;
+        };
+
+        debug!(
+            "recreating surface of {} to change HDR",
+            format_connector_name(&connector)
+        );
+
+        // The old surface must drop its primary plane claim before a new surface can take it.
+        device.surfaces.remove(&crtc);
+
+        let output = niri
+            .global_space
+            .outputs()
+            .find(|output| {
+                let tty_state: &TtyOutputState = output.user_data().get().unwrap();
+                tty_state.node == node && tty_state.crtc == crtc
+            })
+            .cloned();
+
+        let res = self.connect_connector_with_fallback(
+            niri,
+            node,
+            connector,
+            crtc,
+            hdr_wanted,
+            output.clone(),
+        );
+
+        if let Err(err) = res {
+            warn!("error recreating surface: {err:?}");
+            if let Some(output) = output {
+                niri.remove_output(&output);
+            }
+        }
+    }
+
+    pub fn set_output_auto_hdr(&mut self, niri: &mut Niri, output: &Output, enable: bool) {
+        let _span = tracy_client::span!("Tty::set_output_auto_hdr");
+
+        let tty_state: &TtyOutputState = output.user_data().get().unwrap();
+        let (node, crtc) = (tty_state.node, tty_state.crtc);
+
+        let Some(surface) = self
+            .devices
+            .get(&node)
+            .and_then(|device| device.surfaces.get(&crtc))
+        else {
+            return;
+        };
+
+        let is_auto = surface.hdr_config.is_some_and(|hdr| hdr.auto);
+        if !is_auto || surface.hdr.is_some() == enable {
+            return;
+        }
+
+        let word = if enable { "enabling" } else { "disabling" };
+        debug!("output {:?}: {word} automatic HDR", surface.name.connector);
+
+        self.recreate_surface(niri, node, crtc, enable);
+        self.refresh_ipc_outputs(niri);
     }
 
     fn wants_hdr(&self, node: DrmNode, connector: &connector::Info, crtc: crtc::Handle) -> bool {
@@ -1310,7 +1418,8 @@ impl Tty {
         node: DrmNode,
         connector: connector::Info,
         crtc: crtc::Handle,
-        allow_hdr: bool,
+        hdr_wanted: bool,
+        existing: Option<Output>,
     ) -> anyhow::Result<()> {
         let connector_name = format_connector_name(&connector);
         debug!("connecting connector: {connector_name}");
@@ -1380,7 +1489,8 @@ impl Tty {
         debug!("picking mode: {mode:?}");
 
         let mut hdr = None;
-        if allow_hdr && config.is_hdr_on() {
+        let hdr_config = config.hdr.filter(|hdr| !hdr.off);
+        if let Some(hdr_config) = hdr_config.filter(|_| hdr_wanted || config.is_hdr_auto()) {
             // The HDR compositing buffer lives on the rendering GPU and is drawn directly to the
             // output, so the output must be on the same GPU.
             if device.render_node != Some(self.primary_render_node) {
@@ -1395,19 +1505,18 @@ impl Tty {
             {
                 warn!("not enabling HDR on {connector_name}: the renderer can't composite HDR");
             } else {
-                match hdr_params(
-                    &device.drm,
-                    connector.handle(),
-                    config.hdr.as_ref().unwrap(),
-                ) {
+                match hdr_params(&device.drm, connector.handle(), &hdr_config) {
                     Ok(params) => {
-                        debug!("enabling HDR on {connector_name}: {params:?}");
+                        debug!("HDR parameters for {connector_name}: {params:?}");
                         hdr = Some(params);
                     }
                     Err(err) => warn!("not enabling HDR on {connector_name}: {err:?}"),
                 }
             }
         }
+
+        let auto_hdr = hdr.filter(|_| config.is_hdr_auto());
+        let hdr = hdr.filter(|_| hdr_wanted);
 
         let mut orientation = None;
         if let Ok(mut props) = ConnectorProperties::try_new(&device.drm, connector.handle()) {
@@ -1470,20 +1579,22 @@ impl Tty {
         // Update the output mode.
         let (physical_width, physical_height) = connector.size().unwrap_or((0, 0));
 
-        let output = Output::new(
-            connector_name.clone(),
-            PhysicalProperties {
-                size: (physical_width as i32, physical_height as i32).into(),
-                subpixel: connector.subpixel().into(),
-                model: output_name.model.as_deref().unwrap_or("Unknown").to_owned(),
-                make: output_name.make.as_deref().unwrap_or("Unknown").to_owned(),
-                serial_number: output_name
-                    .serial
-                    .as_deref()
-                    .unwrap_or("Unknown")
-                    .to_owned(),
-            },
-        );
+        let output = existing.clone().unwrap_or_else(|| {
+            Output::new(
+                connector_name.clone(),
+                PhysicalProperties {
+                    size: (physical_width as i32, physical_height as i32).into(),
+                    subpixel: connector.subpixel().into(),
+                    model: output_name.model.as_deref().unwrap_or("Unknown").to_owned(),
+                    make: output_name.make.as_deref().unwrap_or("Unknown").to_owned(),
+                    serial_number: output_name
+                        .serial
+                        .as_deref()
+                        .unwrap_or("Unknown")
+                        .to_owned(),
+                },
+            )
+        });
 
         let wl_mode = Mode::from(mode);
         output.change_current_state(Some(wl_mode), None, None, None);
@@ -1649,7 +1760,7 @@ impl Tty {
             gamma_props,
             pending_gamma_change: None,
             hdr,
-            hdr_config: config.hdr.filter(|hdr| !hdr.off),
+            hdr_config,
             hdr_buffer: HdrBuffer::new(),
             vblank_frame: None,
             vblank_frame_name,
@@ -1662,6 +1773,12 @@ impl Tty {
         assert!(res.is_none(), "crtc must not have already existed");
 
         color::set_output_hdr(&output, hdr);
+        color::set_output_auto_hdr(&output, auto_hdr);
+
+        if existing.is_some() {
+            niri.output_surface_recreated(&output, Some(refresh_interval(mode)), vrr_enabled);
+            return Ok(());
+        }
 
         niri.add_output(output.clone(), Some(refresh_interval(mode)), vrr_enabled);
 
@@ -2600,41 +2717,48 @@ impl Tty {
                 // Check if HDR needs to change. Compare against the requested config rather than
                 // the HDR state, since enabling HDR may have failed.
                 let hdr_config = config.hdr.filter(|hdr| !hdr.off);
-                let new_hdr = hdr_config
-                    .filter(|_| device.render_node == Some(self.primary_render_node))
-                    .and_then(|hdr_config| {
-                        hdr_params(&device.drm, surface.connector, &hdr_config)
-                            .map_err(|err| debug!("not enabling HDR: {err:?}"))
-                            .ok()
-                    });
-                match (surface.hdr, new_hdr) {
-                    _ if hdr_config == surface.hdr_config => (),
-                    (None, None) => surface.hdr_config = hdr_config,
-                    (Some(old), Some(new)) if old.signalling_eq(&new) => {
-                        surface.hdr_config = hdr_config;
-                        if old != new {
-                            // Only rendering parameters changed.
+                if hdr_config != surface.hdr_config {
+                    // Automatic HDR outputs keep their current signalling until the next check.
+                    let hdr_wanted =
+                        config.is_hdr_on() || (config.is_hdr_auto() && surface.hdr.is_some());
+                    let new_hdr = hdr_config
+                        .filter(|_| device.render_node == Some(self.primary_render_node))
+                        .and_then(|hdr_config| {
+                            hdr_params(&device.drm, surface.connector, &hdr_config)
+                                .map_err(|err| debug!("not enabling HDR: {err:?}"))
+                                .ok()
+                        });
+
+                    match (surface.hdr, new_hdr.filter(|_| hdr_wanted)) {
+                        (None, None) => (),
+                        // Only rendering parameters changed.
+                        (Some(old), Some(new)) if old.signalling_eq(&new) => {
                             surface.hdr = Some(new);
-                            let output = niri
-                                .global_space
-                                .outputs()
-                                .find(|output| {
-                                    let tty_state: &TtyOutputState =
-                                        output.user_data().get().unwrap();
-                                    tty_state.node == node && tty_state.crtc == crtc
-                                })
-                                .cloned();
-                            if let Some(output) = output {
-                                color::set_output_hdr(&output, Some(new));
-                                niri.output_color_changed(&output);
-                            }
+                        }
+                        _ => {
+                            // Switching HDR signalling requires a modeset with all connector
+                            // properties set from the start, so recreate the surface.
+                            to_reconnect.push((node, crtc, hdr_wanted));
+                            continue;
                         }
                     }
-                    _ => {
-                        // Switching HDR signalling requires a modeset with all connector
-                        // properties set from the start, so recreate the output.
-                        to_reconnect.push((node, crtc, connector.clone()));
-                        continue;
+
+                    surface.hdr_config = hdr_config;
+                    let output = niri
+                        .global_space
+                        .outputs()
+                        .find(|output| {
+                            let tty_state: &TtyOutputState = output.user_data().get().unwrap();
+                            tty_state.node == node && tty_state.crtc == crtc
+                        })
+                        .cloned();
+                    if let Some(output) = output {
+                        color::set_output_hdr(&output, surface.hdr);
+                        color::set_output_auto_hdr(
+                            &output,
+                            new_hdr.filter(|_| config.is_hdr_auto()),
+                        );
+                        niri.output_color_changed(&output);
                     }
                 }
 
@@ -2761,15 +2885,8 @@ impl Tty {
             self.connector_disconnected(niri, node, crtc);
         }
 
-        for (node, crtc, connector) in to_reconnect {
-            debug!(
-                "reconnecting {} to change HDR",
-                format_connector_name(&connector)
-            );
-            self.connector_disconnected(niri, node, crtc);
-            if let Err(err) = self.connector_connected(niri, node, connector, crtc) {
-                warn!("error reconnecting connector: {err:?}");
-            }
+        for (node, crtc, hdr_wanted) in to_reconnect {
+            self.recreate_surface(niri, node, crtc, hdr_wanted);
         }
 
         // Sort by output name to get more predictable first focused output at initial compositor

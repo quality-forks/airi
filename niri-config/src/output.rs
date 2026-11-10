@@ -95,9 +95,14 @@ impl Output {
         self.variable_refresh_rate.is_none()
     }
 
-    /// Whether HDR output was requested for this output.
+    /// Whether HDR output was requested for this output at all times.
     pub fn is_hdr_on(&self) -> bool {
-        self.hdr.as_ref().is_some_and(|hdr| !hdr.off)
+        self.hdr.as_ref().is_some_and(|hdr| !hdr.off && !hdr.auto)
+    }
+
+    /// Whether HDR output was requested for this output while HDR content is fullscreen.
+    pub fn is_hdr_auto(&self) -> bool {
+        self.hdr.as_ref().is_some_and(|hdr| !hdr.off && hdr.auto)
     }
 }
 
@@ -145,10 +150,13 @@ pub struct MaxBpc(pub niri_ipc::MaxBpc);
 /// HDR output settings.
 ///
 /// The presence of the `hdr` block enables HDR signalling on the output, unless `off` is set.
+/// With `auto`, HDR signalling is only enabled while a fullscreen window shows HDR content.
 #[derive(knuffel::Decode, Debug, Clone, Copy, PartialEq, Default)]
 pub struct Hdr {
     #[knuffel(child)]
     pub off: bool,
+    #[knuffel(child)]
+    pub auto: bool,
     /// Luminance of SDR white (and of the reference white of HDR content), in cd/m².
     ///
     /// Raise this if SDR content looks too dim compared to SDR mode.
