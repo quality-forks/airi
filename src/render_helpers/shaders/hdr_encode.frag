@@ -22,7 +22,7 @@ uniform float tint;
 
 // Encodes the blend space into BT.2100 PQ, see src/color.rs.
 
-// BT.709 to BT.2020.
+// Blend space to BT.2020.
 uniform mat3 niri_matrix;
 // Reference white, in PQ normalized luminance.
 uniform float niri_reference;

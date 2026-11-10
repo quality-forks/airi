@@ -172,6 +172,11 @@ pub struct Hdr {
     /// By default this comes from the EDID.
     #[knuffel(child, unwrap(argument))]
     pub min_luminance: Option<FloatOrInt<0, 10>>,
+    /// How far SDR colors stretch from sRGB toward the display primaries, from 0 to 1.
+    ///
+    /// Monitors in SDR mode often show sRGB on their native gamut, so 1 matches that look.
+    #[knuffel(child, unwrap(argument))]
+    pub sdr_gamut_wideness: Option<FloatOrInt<0, 1>>,
 }
 
 #[derive(knuffel::Decode, Debug, Clone, PartialEq, Default)]

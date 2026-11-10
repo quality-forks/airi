@@ -122,6 +122,7 @@ impl HdrBuffer {
 
         let target = ColorTarget::Hdr {
             headroom: params.headroom(),
+            sdr_gamut: params.sdr_gamut(),
         };
         let res = color::with_target(target, || {
             let mut texture = inner.texture.clone();

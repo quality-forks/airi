@@ -407,7 +407,14 @@ impl ImageDescription {
 
         let to_xyz = self.primaries.to_xyz();
         let luma = to_xyz.row(1);
-        let matrix = conversion_matrix(&self.primaries, &Primaries::BT709);
+        let mut matrix = conversion_matrix(&self.primaries, &Primaries::BT709);
+        if let ColorTarget::Hdr {
+            sdr_gamut: Some(sdr_gamut),
+            ..
+        } = target
+        {
+            matrix = sdr_gamut.inverse() * matrix;
+        }
 
         let headroom = target.headroom();
         let tone_mapping = if intent == RenderIntent::Perceptual {
@@ -445,6 +452,8 @@ pub struct HdrParams {
     pub min_luminance: f64,
     pub max_fall_luminance: f64,
     pub display_primaries: Primaries,
+    /// How far SDR colors stretch from BT.709 toward the display primaries, from 0 to 1.
+    pub sdr_gamut_wideness: f64,
 }
 
 impl HdrParams {
@@ -452,8 +461,33 @@ impl HdrParams {
     pub fn signalling_eq(&self, other: &Self) -> bool {
         Self {
             reference_luminance: other.reference_luminance,
+            sdr_gamut_wideness: other.sdr_gamut_wideness,
             ..*self
         } == *other
+    }
+
+    /// Matrix stretching blend space colors toward the display primaries, applied when encoding.
+    ///
+    /// Blend space values are read as coordinates in primaries partway between BT.709 and the
+    /// display's, keeping the BT.709 white point so that white stays neutral.
+    pub fn sdr_gamut(&self) -> Option<DMat3> {
+        let w = self.sdr_gamut_wideness;
+        if w <= 0. {
+            return None;
+        }
+
+        let lerp = |a: Chromaticity, b: Chromaticity| {
+            Chromaticity::new(a.x + (b.x - a.x) * w, a.y + (b.y - a.y) * w)
+        };
+        let src = Primaries::BT709;
+        let dst = self.display_primaries;
+        let stretched = Primaries {
+            red: lerp(src.red, dst.red),
+            green: lerp(src.green, dst.green),
+            blue: lerp(src.blue, dst.blue),
+            white: src.white,
+        };
+        Some(conversion_matrix(&stretched, &Primaries::BT709))
     }
 
     /// How much brighter than reference white the output can go.
@@ -463,8 +497,13 @@ impl HdrParams {
 
     /// Uniforms for the final blend space to PQ encoding pass.
     pub fn encode(&self) -> HdrEncode {
+        let mut matrix = conversion_matrix(&Primaries::BT709, &Primaries::BT2020);
+        if let Some(sdr_gamut) = self.sdr_gamut() {
+            matrix *= sdr_gamut;
+        }
+
         HdrEncode {
-            matrix: conversion_matrix(&Primaries::BT709, &Primaries::BT2020).as_mat3(),
+            matrix: matrix.as_mat3(),
             reference: (self.reference_luminance / 10000.) as f32,
             max: (self.peak_luminance.max(self.reference_luminance) / 10000.) as f32,
         }
@@ -517,7 +556,7 @@ pub fn output_image_description(output: &Output) -> ImageDescription {
 /// Uniforms for encoding the blend space into BT.2100 PQ.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct HdrEncode {
-    /// BT.709 to BT.2020 primaries.
+    /// Blend space to BT.2020 primaries.
     pub matrix: Mat3,
     /// Reference white in PQ normalized luminance (1.0 = 10000 cd/m²).
     pub reference: f32,
@@ -535,6 +574,8 @@ pub enum ColorTarget {
     Hdr {
         /// Peak luminance relative to reference white.
         headroom: f64,
+        /// The output's [`HdrParams::sdr_gamut`], undone for content that has a description.
+        sdr_gamut: Option<DMat3>,
     },
 }
 
@@ -542,7 +583,7 @@ impl ColorTarget {
     pub fn headroom(self) -> f64 {
         match self {
             ColorTarget::Sdr => 1.,
-            ColorTarget::Hdr { headroom } => headroom,
+            ColorTarget::Hdr { headroom, .. } => headroom,
         }
     }
 }

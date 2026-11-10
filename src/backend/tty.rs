@@ -3997,6 +3997,7 @@ fn hdr_params(
         min_luminance,
         max_fall_luminance,
         display_primaries,
+        sdr_gamut_wideness: config.sdr_gamut_wideness.map_or(0., |x| x.0),
     })
 }
 

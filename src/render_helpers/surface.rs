@@ -347,7 +347,10 @@ fn convert_texture(
     desc: ImageDescription,
     intent: RenderIntent,
 ) -> anyhow::Result<GlesTexture> {
-    let target = ColorTarget::Hdr { headroom: 10000. };
+    let target = ColorTarget::Hdr {
+        headroom: 10000.,
+        sdr_gamut: None,
+    };
     let Some(transform) = desc.transform_to_blend(intent, target) else {
         return Ok(texture.clone());
     };
