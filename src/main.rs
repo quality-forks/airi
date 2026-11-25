@@ -21,7 +21,7 @@ use niri::dbus;
 use niri::ipc::client::handle_msg;
 use niri::niri::State;
 use niri::utils::spawning::{
-    spawn, spawn_sh, store_and_increase_nofile_rlimit, CHILD_DISPLAY, CHILD_ENV,
+    spawn, spawn_sh, store_and_increase_nofile_rlimit, SpawnFocus, CHILD_DISPLAY, CHILD_ENV,
     REMOVE_ENV_RUST_BACKTRACE, REMOVE_ENV_RUST_LIB_BACKTRACE,
 };
 use niri::utils::{cause_panic, version, watcher, xwayland, IS_SYSTEMD_SERVICE};
@@ -257,13 +257,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     watcher::setup(&mut state, &config_path, config_includes);
 
     // Spawn commands from cli and auto-start.
-    spawn(cli.command, None);
+    spawn(cli.command, SpawnFocus::Default);
 
     for elem in spawn_at_startup {
-        spawn(elem.command, None);
+        spawn(elem.command, SpawnFocus::Default);
     }
     for elem in spawn_sh_at_startup {
-        spawn_sh(elem.command, None);
+        spawn_sh(elem.command, SpawnFocus::Default);
     }
 
     // Show the config error notification right away if needed.

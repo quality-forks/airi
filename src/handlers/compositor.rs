@@ -21,8 +21,9 @@ use super::xdg_shell::add_mapped_toplevel_pre_commit_hook;
 use crate::handlers::XDG_ACTIVATION_TOKEN_TIMEOUT;
 use crate::layout::{ActivateWindow, AddWindowTarget, LayoutElement as _};
 use crate::niri::{CastTarget, ClientState, LockState, State};
+use crate::utils::spawning::is_unfocused_spawn;
 use crate::utils::transaction::Transaction;
-use crate::utils::{is_mapped, send_scale_transform};
+use crate::utils::{get_credentials_for_surface, is_mapped, send_scale_transform};
 use crate::window::{InitialConfigureState, Mapped, ResolvedWindowRules, Unmapped};
 
 impl CompositorHandler for State {
@@ -150,13 +151,19 @@ impl CompositorHandler for State {
                     let is_floating = rules.compute_open_floating(toplevel);
 
                     // Figure out if we should activate the window.
-                    let activate = rules.open_focused.map(|focus| {
-                        if focus {
-                            ActivateWindow::Yes
-                        } else {
-                            ActivateWindow::No
-                        }
-                    });
+                    let spawned_unfocused = get_credentials_for_surface(surface)
+                        .is_some_and(|creds| is_unfocused_spawn(creds.pid));
+                    let activate = if spawned_unfocused {
+                        Some(ActivateWindow::No)
+                    } else {
+                        rules.open_focused.map(|focus| {
+                            if focus {
+                                ActivateWindow::Yes
+                            } else {
+                                ActivateWindow::No
+                            }
+                        })
+                    };
                     let activate = activate.unwrap_or_else(|| {
                         // Check the token timestamp again in case the window took a while between
                         // requesting activation and mapping.

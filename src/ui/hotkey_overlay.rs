@@ -312,7 +312,7 @@ fn collect_actions(config: &Config) -> Vec<&Action> {
             && modifiers.intersects(Modifiers::COMPOSITOR | Modifiers::SUPER)
         {
             bind_actions(bind)
-                .find(|action| matches!(action, Action::Spawn(_) | Action::SpawnSh(_)))
+                .find(|action| matches!(action, Action::Spawn(..) | Action::SpawnSh(..)))
         } else {
             None
         }
@@ -508,11 +508,11 @@ fn action_name(action: &Action) -> String {
         }
         Action::ToggleOverview => String::from("Open the Overview"),
         Action::Screenshot(_, _) => String::from("Take a Screenshot"),
-        Action::Spawn(args) => format!(
+        Action::Spawn(args, _) => format!(
             "Spawn <span face='monospace' bgcolor='#000000'>{}</span>",
             args.first().unwrap_or(&String::new())
         ),
-        Action::SpawnSh(command) => format!(
+        Action::SpawnSh(command, _) => format!(
             "Spawn <span face='monospace' bgcolor='#000000'>{}</span>",
             // Fairly crude but should get the job done in most cases.
             command.split_ascii_whitespace().next().unwrap_or("")
@@ -904,7 +904,7 @@ mod tests {
 
         let actions = collect_actions(&config);
         assert!(actions.contains(&&Action::Screenshot(true, None)));
-        assert!(actions.contains(&&Action::Spawn(vec![String::from("foot")])));
+        assert!(actions.contains(&&Action::Spawn(vec![String::from("foot")], true)));
 
         // Release binds keep actions in the list with hide-not-bound.
         let config = Config::parse_mem(
@@ -948,7 +948,7 @@ mod tests {
 
         let mut snapshot = String::new();
         for action in collect_actions(&config) {
-            if let Action::Spawn(args) = action {
+            if let Action::Spawn(args, _) = action {
                 snapshot.push_str(&args[0]);
                 snapshot.push('\n');
             }

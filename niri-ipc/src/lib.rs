@@ -214,12 +214,20 @@ pub enum Action {
         /// Command to spawn.
         #[cfg_attr(feature = "clap", arg(last = true, required = true))]
         command: Vec<String>,
+        /// Whether windows opened by the command take focus.
+        #[serde(default = "default_true")]
+        #[cfg_attr(feature = "clap", arg(long, action = clap::ArgAction::Set, default_value_t = true))]
+        focus: bool,
     },
     /// Spawn a command through the shell.
     SpawnSh {
         /// Command to run.
         #[cfg_attr(feature = "clap", arg(last = true, required = true))]
         command: String,
+        /// Whether windows opened by the command take focus.
+        #[serde(default = "default_true")]
+        #[cfg_attr(feature = "clap", arg(long, action = clap::ArgAction::Set, default_value_t = true))]
+        focus: bool,
     },
     /// Do a screen transition.
     DoScreenTransition {

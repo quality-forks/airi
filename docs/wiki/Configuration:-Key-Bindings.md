@@ -398,6 +398,16 @@ binds {
 }
 ```
 
+Set `focus=false` to open the program's windows without focusing them.
+This works on `spawn-sh` too, and on `niri msg action spawn --focus false -- alacritty`.
+It applies to windows that the program opens in the first 10 seconds, and takes priority over the `open-focused` window rule.
+
+```kdl
+binds {
+    Mod+Shift+T { spawn "alacritty" focus=false; }
+}
+```
+
 #### `spawn-sh`
 
 <sup>Since: 25.08</sup>

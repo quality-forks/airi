@@ -246,8 +246,14 @@ pub enum Action {
     DebugToggleOpaqueRegions,
     DebugToggleDamage,
     ToggleTouchpad,
-    Spawn(#[knuffel(arguments)] Vec<String>),
-    SpawnSh(#[knuffel(argument)] String),
+    Spawn(
+        #[knuffel(arguments)] Vec<String>,
+        #[knuffel(property(name = "focus"), default = true)] bool,
+    ),
+    SpawnSh(
+        #[knuffel(argument)] String,
+        #[knuffel(property(name = "focus"), default = true)] bool,
+    ),
     DoScreenTransition(#[knuffel(property(name = "delay-ms"))] Option<u16>),
     #[knuffel(skip)]
     ConfirmScreenshot {
@@ -562,8 +568,8 @@ impl From<niri_ipc::Action> for Action {
             niri_ipc::Action::ChangeVt { vt } => Self::ChangeVt(vt),
             niri_ipc::Action::PowerOffMonitors {} => Self::PowerOffMonitors,
             niri_ipc::Action::PowerOnMonitors {} => Self::PowerOnMonitors,
-            niri_ipc::Action::Spawn { command } => Self::Spawn(command),
-            niri_ipc::Action::SpawnSh { command } => Self::SpawnSh(command),
+            niri_ipc::Action::Spawn { command, focus } => Self::Spawn(command, focus),
+            niri_ipc::Action::SpawnSh { command, focus } => Self::SpawnSh(command, focus),
             niri_ipc::Action::DoScreenTransition { delay_ms } => Self::DoScreenTransition(delay_ms),
             niri_ipc::Action::Screenshot { show_pointer, path } => {
                 Self::Screenshot(show_pointer, path)
@@ -1097,7 +1103,7 @@ where
         // even if their contents are not valid.
         let dummy = Self {
             key,
-            action: BoundAction::Press(Action::Spawn(vec![])),
+            action: BoundAction::Press(Action::Spawn(vec![], true)),
             repeat: true,
             pass_through: None,
             cooldown: None,
@@ -1217,7 +1223,7 @@ where
 
         if let Some(node) = allow_when_locked_node {
             for action in press_action.iter().chain(release_action.iter()) {
-                if !matches!(action, Action::Spawn(_) | Action::SpawnSh(_)) {
+                if !matches!(action, Action::Spawn(..) | Action::SpawnSh(..)) {
                     ctx.emit_error(DecodeError::unexpected(
                         node,
                         "property",

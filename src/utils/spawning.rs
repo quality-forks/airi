@@ -4,6 +4,7 @@ use std::path::Path;
 use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::RwLock;
+use std::time::Duration;
 use std::{io, thread};
 
 use atomic::Atomic;
@@ -11,12 +12,15 @@ use libc::{getrlimit, rlim_t, rlimit, setrlimit, RLIMIT_NOFILE};
 use niri_config::Environment;
 use smithay::wayland::xdg_activation::XdgActivationToken;
 
-use crate::utils::expand_home;
+use crate::handlers::XDG_ACTIVATION_TOKEN_TIMEOUT;
+use crate::utils::{expand_home, get_monotonic_time};
 
 pub static REMOVE_ENV_RUST_BACKTRACE: AtomicBool = AtomicBool::new(false);
 pub static REMOVE_ENV_RUST_LIB_BACKTRACE: AtomicBool = AtomicBool::new(false);
 pub static CHILD_ENV: RwLock<Environment> = RwLock::new(Environment(Vec::new()));
 pub static CHILD_DISPLAY: RwLock<Option<String>> = RwLock::new(None);
+
+const UNFOCUSED_SPAWN_ENV: &str = "NIRI_SPAWN_UNFOCUSED";
 
 static ORIGINAL_NOFILE_RLIMIT_CUR: Atomic<rlim_t> = Atomic::new(0);
 static ORIGINAL_NOFILE_RLIMIT_MAX: Atomic<rlim_t> = Atomic::new(0);
@@ -62,8 +66,14 @@ pub fn restore_nofile_rlimit() {
     unsafe { setrlimit(RLIMIT_NOFILE, &rlim) };
 }
 
+pub enum SpawnFocus {
+    Default,
+    Token(XdgActivationToken),
+    Unfocused,
+}
+
 /// Spawns the command to run independently of the compositor.
-pub fn spawn<T: AsRef<OsStr> + Send + 'static>(command: Vec<T>, token: Option<XdgActivationToken>) {
+pub fn spawn<T: AsRef<OsStr> + Send + 'static>(command: Vec<T>, focus: SpawnFocus) {
     let _span = tracy_client::span!();
 
     if command.is_empty() {
@@ -75,7 +85,7 @@ pub fn spawn<T: AsRef<OsStr> + Send + 'static>(command: Vec<T>, token: Option<Xd
         .name("Command Spawner".to_owned())
         .spawn(move || {
             let (command, args) = command.split_first().unwrap();
-            spawn_sync(command, args, token);
+            spawn_sync(command, args, focus);
         });
 
     if let Err(err) = res {
@@ -89,14 +99,14 @@ pub fn spawn<T: AsRef<OsStr> + Send + 'static>(command: Vec<T>, token: Option<Xd
 ///
 /// - https://github.com/swaywm/sway/blob/b3dcde8d69c3f1304b076968a7a64f54d0c958be/sway/commands/exec_always.c#L64
 /// - https://github.com/hyprwm/Hyprland/blob/1ac1ff457ab8ef1ae6a8f2ab17ee7965adfa729f/src/managers/KeybindManager.cpp#L987
-pub fn spawn_sh(command: String, token: Option<XdgActivationToken>) {
-    spawn(vec![String::from("sh"), String::from("-c"), command], token);
+pub fn spawn_sh(command: String, focus: SpawnFocus) {
+    spawn(vec![String::from("sh"), String::from("-c"), command], focus);
 }
 
 fn spawn_sync(
     command: impl AsRef<OsStr>,
     args: impl IntoIterator<Item = impl AsRef<OsStr>>,
-    token: Option<XdgActivationToken>,
+    focus: SpawnFocus,
 ) {
     let _span = tracy_client::span!();
 
@@ -149,9 +159,17 @@ fn spawn_sync(
     }
     drop(env);
 
-    if let Some(token) = token.as_ref() {
-        process.env("XDG_ACTIVATION_TOKEN", token.as_str());
-        process.env("DESKTOP_STARTUP_ID", token.as_str());
+    process.env_remove(UNFOCUSED_SPAWN_ENV);
+    match focus {
+        SpawnFocus::Default => (),
+        SpawnFocus::Token(token) => {
+            process.env("XDG_ACTIVATION_TOKEN", token.as_str());
+            process.env("DESKTOP_STARTUP_ID", token.as_str());
+        }
+        SpawnFocus::Unfocused => {
+            let now = get_monotonic_time().as_micros().to_string();
+            process.env(UNFOCUSED_SPAWN_ENV, now);
+        }
     }
 
     unsafe { process.pre_exec(crate::utils::signals::unblock_all) };
@@ -170,6 +188,28 @@ fn spawn_sync(
             warn!("error waiting for child: {err:?}");
         }
     }
+}
+
+/// Returns whether `pid` was started by an unfocused spawn recently enough to still apply.
+///
+/// The marker lives in the process environment so that it survives `sh -c` and daemonizing
+/// forks, which break PID ancestry.
+pub fn is_unfocused_spawn(pid: i32) -> bool {
+    let Ok(environ) = std::fs::read(format!("/proc/{pid}/environ")) else {
+        return false;
+    };
+
+    let prefix = format!("{UNFOCUSED_SPAWN_ENV}=");
+    let spawned_at = environ
+        .split(|&byte| byte == 0)
+        .find_map(|var| var.strip_prefix(prefix.as_bytes()))
+        .and_then(|value| std::str::from_utf8(value).ok())
+        .and_then(|value| value.parse().ok())
+        .map(Duration::from_micros);
+
+    spawned_at.is_some_and(|spawned_at| {
+        get_monotonic_time().saturating_sub(spawned_at) < XDG_ACTIVATION_TOKEN_TIMEOUT
+    })
 }
 
 #[cfg(not(feature = "systemd"))]

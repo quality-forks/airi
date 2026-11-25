@@ -2537,6 +2537,7 @@ mod tests {
                                 [
                                     "alacritty",
                                 ],
+                                true,
                             ),
                         ),
                         repeat: true,
@@ -2785,6 +2786,7 @@ mod tests {
                         action: Press(
                             SpawnSh(
                                 "pkill orca || exec orca",
+                                true,
                             ),
                         ),
                         repeat: true,

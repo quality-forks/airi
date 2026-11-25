@@ -57,7 +57,7 @@ use crate::layout::{ActivateWindow, LayoutElement as _};
 use crate::niri::{CastTarget, Niri, PointerVisibility, State};
 use crate::ui::mru::{WindowMru, WindowMruUi};
 use crate::ui::screenshot_ui::ScreenshotUi;
-use crate::utils::spawning::{spawn, spawn_sh};
+use crate::utils::spawning::{spawn, spawn_sh, SpawnFocus};
 use crate::utils::{center, get_monotonic_time, CastSessionId, ResizeEdge};
 use crate::window::mapped::MappedId;
 
@@ -925,6 +925,15 @@ impl State {
         }
     }
 
+    fn spawn_focus(&mut self, focus: bool) -> SpawnFocus {
+        if !focus {
+            return SpawnFocus::Unfocused;
+        }
+
+        let (token, _) = self.niri.activation_state.create_external_token(None);
+        SpawnFocus::Token(token.clone())
+    }
+
     pub fn do_action(&mut self, action: Action, allow_when_locked: bool, time: InputTime) {
         if self.niri.is_locked() && !(allow_when_locked || allowed_when_locked(&action)) {
             return;
@@ -988,14 +997,8 @@ impl State {
                     }
                 }
             }
-            Action::Spawn(command) => {
-                let (token, _) = self.niri.activation_state.create_external_token(None);
-                spawn(command, Some(token.clone()));
-            }
-            Action::SpawnSh(command) => {
-                let (token, _) = self.niri.activation_state.create_external_token(None);
-                spawn_sh(command, Some(token.clone()));
-            }
+            Action::Spawn(command, focus) => spawn(command, self.spawn_focus(focus)),
+            Action::SpawnSh(command, focus) => spawn_sh(command, self.spawn_focus(focus)),
             Action::DoScreenTransition(delay_ms) => {
                 self.backend.with_primary_renderer(|renderer| {
                     self.niri.do_screen_transition(renderer, delay_ms);
@@ -5210,7 +5213,7 @@ fn find_configured_switch_action(
     };
     switch_action
         .as_ref()
-        .map(|switch_action| Action::Spawn(switch_action.spawn.clone()))
+        .map(|switch_action| Action::Spawn(switch_action.spawn.clone(), true))
 }
 
 fn modifiers_from_state(mods: ModifiersState) -> Modifiers {
@@ -5364,8 +5367,8 @@ fn allowed_during_screenshot(action: &Action) -> bool {
             | Action::PowerOnMonitors
             | Action::ToggleTouchpad
             // Intended for binds such as volume up/down, lock the screen, etc.
-            | Action::Spawn(_)
-            | Action::SpawnSh(_)
+            | Action::Spawn(..)
+            | Action::SpawnSh(..)
             // The screenshot UI can handle these.
             | Action::MoveColumnLeft
             | Action::MoveColumnLeftOrToMonitorLeft
